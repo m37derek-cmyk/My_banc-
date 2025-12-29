@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
+from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
+from sklearn.metrics import confusion_matrix, classification_report
 
 # ==========================================
 # 1. CONFIGURATION DE LA PAGE
 # ==========================================
 st.set_page_config(
-    page_title="Prédiction Risque Crédit",
+    page_title="Prédiction Risque Crédit (CV)",
     page_icon="🏦",
     layout="wide"
 )
@@ -22,7 +22,7 @@ st.set_page_config(
 # 2. CHARGEMENT ET ENTRAÎNEMENT (CACHE)
 # ==========================================
 @st.cache_resource
-def load_and_train_model():
+def load_and_evaluate_model():
     # --- Gestion robuste du chemin du fichier ---
     current_dir = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(current_dir, "credit_data.csv")
@@ -32,51 +32,59 @@ def load_and_train_model():
         df = pd.read_csv(file_path)
         df = df.dropna()
     except FileNotFoundError:
-        return None, None, None, None, None, f"Erreur : Le fichier est introuvable au chemin : {file_path}"
+        return None, None, None, None, None, None, f"Erreur : Le fichier est introuvable au chemin : {file_path}"
     except Exception as e:
-        return None, None, None, None, None, f"Erreur inattendue : {e}"
+        return None, None, None, None, None, None, f"Erreur inattendue : {e}"
 
     # --- Préparation des variables ---
     if not {'income', 'age', 'loan', 'LTI', 'default'}.issubset(df.columns):
-        return None, None, None, None, None, "Erreur : Le fichier CSV ne contient pas les bonnes colonnes."
+        return None, None, None, None, None, None, "Erreur : Colonnes manquantes dans le CSV."
 
     X = df[['income', 'age', 'loan', 'LTI']]
     y = df['default']
 
-    # --- Séparation Train / Test (Pour l'évaluation) ---
-    # On garde 20% des données pour tester la matrice de confusion
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # --- Standardisation ---
+    # --- Standardisation Globale ---
+    # On standardise tout le dataset car on va faire de la validation croisée
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_scaled = scaler.fit_transform(X)
 
-    # --- Entraînement du modèle ---
+    # --- Configuration de la Validation Croisée ---
+    # 5 plis (folds), mélangés aléatoirement
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
     model = LogisticRegression()
-    model.fit(X_train_scaled, y_train)
 
-    # --- Calcul des Métriques de performance ---
-    y_pred = model.predict(X_test_scaled)
+    # --- Étape 1 : Évaluation par Cross-Validation ---
+    # Calcul des scores de précision pour chaque pli
+    cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='accuracy')
     
-    acc = accuracy_score(y_test, y_pred)
-    cm = confusion_matrix(y_test, y_pred)
-    report = classification_report(y_test, y_pred, output_dict=True)
+    # Génération des prédictions "hors échantillon" pour la matrice de confusion
+    # (Chaque point est prédit lorsqu'il était dans le set de test)
+    y_pred_cv = cross_val_predict(model, X_scaled, y, cv=kf)
 
-    # On retourne le modèle, le scaler, et les métriques
-    return model, scaler, acc, cm, report, None
+    # Calcul des métriques globales basées sur la CV
+    avg_accuracy = cv_scores.mean()
+    std_accuracy = cv_scores.std()
+    cm = confusion_matrix(y, y_pred_cv)
+    report = classification_report(y, y_pred_cv, output_dict=True)
+
+    # --- Étape 2 : Entraînement Final pour l'Application ---
+    # Maintenant qu'on a évalué, on entraîne le modèle sur TOUTES les données
+    # pour qu'il soit le plus performant possible pour l'utilisateur final.
+    final_model = LogisticRegression()
+    final_model.fit(X_scaled, y)
+
+    return final_model, scaler, avg_accuracy, std_accuracy, cm, report, None
 
 # Appel de la fonction
-model, scaler, accuracy, cm, report, error_message = load_and_train_model()
+model, scaler, avg_acc, std_acc, cm, report, error_msg = load_and_evaluate_model()
 
 # ==========================================
 # 3. INTERFACE UTILISATEUR
 # ==========================================
-st.title("🏦 Système de Scoring Crédit (IA)")
+st.title("🏦 Système de Scoring Crédit (Avec Cross-Validation)")
 
-# Gestion de l'affichage en cas d'erreur
-if error_message:
-    st.error(error_message)
+if error_msg:
+    st.error(error_msg)
     st.stop()
 
 # --- Sidebar : Saisie ---
@@ -90,39 +98,30 @@ def user_input_features():
     lti = loan / income
     st.sidebar.info(f"Ratio Dette/Revenu (LTI) : {lti:.4f}")
     
-    data = {
-        'income': income,
-        'age': age,
-        'loan': loan,
-        'LTI': lti
-    }
+    data = {'income': income, 'age': age, 'loan': loan, 'LTI': lti}
     return pd.DataFrame(data, index=[0])
 
 input_df = user_input_features()
 
-# --- Onglets Principaux ---
-tab1, tab2 = st.tabs(["🔮 Prédiction", "📊 Performance du Modèle"])
+# --- Onglets ---
+tab1, tab2 = st.tabs(["🔮 Prédiction", "📊 Performance (Cross-Validation)"])
 
 with tab1:
     st.subheader("1. Profil du client")
     st.write(input_df)
 
     if st.button("Lancer l'analyse du risque"):
-        # 1. Standardisation
+        # Transformation avec le scaler entraîné sur tout le dataset
         input_df_scaled = scaler.transform(input_df)
-
-        # 2. Prédiction
+        
         prediction_proba = model.predict_proba(input_df_scaled)
         risque_defaut = prediction_proba[0][1]
 
         st.subheader("2. Résultat de l'analyse")
-        
         col1, col2 = st.columns(2)
 
         with col1:
-            st.write("**Probabilité de défaut :**")
             st.metric(label="Score de Risque", value=f"{risque_defaut:.2%}")
-            
             if risque_defaut < 0.2:
                 st.progress(risque_defaut)
             elif risque_defaut < 0.5:
@@ -131,51 +130,44 @@ with tab1:
                 st.progress(risque_defaut)
 
         with col2:
-            st.write("**Recommandation IA :**")
             if risque_defaut > 0.5:
                 st.error("⛔ REFUS CONSEILLÉ")
-                st.write("Le risque de non-remboursement est très élevé.")
+                st.write("Risque élevé.")
             elif risque_defaut > 0.2:
                 st.warning("⚠️ EXAMEN MANUEL REQUIS")
-                st.write("Risque modéré, vérifiez les garanties.")
+                st.write("Risque modéré.")
             else:
                 st.success("✅ ACCORD CONSEILLÉ")
-                st.write("Profil fiable et stable.")
+                st.write("Profil fiable.")
 
 with tab2:
-    st.header("Évaluation de la performance")
-    st.markdown("Ces métriques sont calculées sur un jeu de test (20% des données) que le modèle n'a jamais vu.")
+    st.header("Évaluation Robuste (K-Fold Cross-Validation)")
+    st.markdown("""
+    Le modèle a été évalué en utilisant la **Validation Croisée à 5 plis**.
+    Cela signifie que le modèle a été testé 5 fois sur des parties différentes des données.
+    """)
 
     # Affichage des KPIs
-    col_metric1, col_metric2 = st.columns(2)
-    col_metric1.metric("Précision Globale (Accuracy)", f"{accuracy:.2%}")
-    col_metric2.metric("Support (Nb de tests)", int(cm.sum()))
+    col_kpi1, col_kpi2 = st.columns(2)
+    col_kpi1.metric("Précision Moyenne", f"{avg_acc:.2%}", delta=f"± {std_acc:.2%}")
+    col_kpi2.metric("Support Total", int(cm.sum()))
 
     st.markdown("---")
     
-    col_graph1, col_graph2 = st.columns(2)
+    col_g1, col_g2 = st.columns(2)
 
-    with col_graph1:
-        st.subheader("Matrice de Confusion")
-        st.write("Visualisation des bonnes et mauvaises prédictions.")
-        
-        # Création du graphique avec Seaborn
+    with col_g1:
+        st.subheader("Matrice de Confusion Globale")
+        st.write("Cumul des prédictions sur les 5 plis de test.")
         fig, ax = plt.subplots()
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False, ax=ax)
-        ax.set_xlabel('Predit')
-        ax.set_ylabel('Réel')
-        ax.set_xticklabels(['Payé (0)', 'Défaut (1)'])
-        ax.set_yticklabels(['Payé (0)', 'Défaut (1)'])
+        ax.set_xlabel('Prédiction')
+        ax.set_ylabel('Réalité')
+        ax.set_xticklabels(['Payé', 'Défaut'])
+        ax.set_yticklabels(['Payé', 'Défaut'])
         st.pyplot(fig)
 
-    with col_graph2:
-        st.subheader("Détails par classe")
-        # Transformation du rapport en DataFrame pour un affichage propre
+    with col_g2:
+        st.subheader("Rapport de Classification")
         report_df = pd.DataFrame(report).transpose()
         st.dataframe(report_df.style.format("{:.2f}"))
-        
-        st.info("""
-        **Légende :**
-        * **Precision** : Quand le modèle prédit "Défaut", a-t-il raison ?
-        * **Recall** : Sur tous les vrais "Défauts", combien le modèle en a-t-il trouvé ?
-        """)
