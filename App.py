@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 
 # ==========================================
 # 1. CONFIGURATION DE LA PAGE
@@ -15,46 +15,55 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. ENTRAÎNEMENT DU MODÈLE (CACHÉ)
+# 2. CHARGEMENT ET ENTRAÎNEMENT (CACHE)
 # ==========================================
-# On utilise @st.cache_resource pour ne pas ré-entraîner le modèle à chaque clic
 @st.cache_resource
 def load_and_train_model():
-    # Chargement
+    # --- Gestion robuste du chemin du fichier ---
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "credit_data.csv")
+
+    # --- Chargement des données ---
     try:
-        import os
-
-# On récupère le chemin absolu du dossier où se trouve app.py
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# On colle ce chemin avec le nom du fichier
-file_path = os.path.join(current_dir, "credit_data.csv")
-
-df = pd.read_csv(file_path)
+        df = pd.read_csv(file_path)
         df = df.dropna()
     except FileNotFoundError:
-        st.error("Le fichier 'credit_data.csv' est introuvable.")
-        return None, None
+        return None, None, f"Erreur : Le fichier est introuvable au chemin : {file_path}"
+    except Exception as e:
+        return None, None, f"Erreur inattendue : {e}"
 
-    # Variables
+    # --- Préparation des variables ---
+    # X = Features (Revenu, Age, Prêt, Ratio Dette/Revenu)
+    # y = Target (0 = Payé, 1 = Défaut)
+    if not {'income', 'age', 'loan', 'LTI', 'default'}.issubset(df.columns):
+        return None, None, "Erreur : Le fichier CSV ne contient pas les bonnes colonnes."
+
     X = df[['income', 'age', 'loan', 'LTI']]
     y = df['default']
 
-    # Standardisation (Très important pour la régression logistique)
+    # --- Standardisation (Crucial pour la Régression Logistique) ---
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Entraînement
+    # --- Entraînement du modèle ---
     model = LogisticRegression()
     model.fit(X_scaled, y)
 
-    return model, scaler
+    return model, scaler, None
 
-# Chargement du modèle et du scaler
-model, scaler = load_and_train_model()
+# Appel de la fonction
+model, scaler, error_message = load_and_train_model()
 
 # ==========================================
-# 3. INTERFACE UTILISATEUR (SIDEBAR)
+# 3. INTERFACE UTILISATEUR
 # ==========================================
+st.title("🏦 Système de Scoring Crédit (IA)")
+
+# Gestion de l'affichage en cas d'erreur de chargement
+if error_message:
+    st.error(error_message)
+    st.stop() # Arrête l'application ici si le modèle n'est pas chargé
+
 st.sidebar.header("Paramètres du Client")
 
 def user_input_features():
@@ -63,12 +72,9 @@ def user_input_features():
     age = st.sidebar.slider("Âge", min_value=18, max_value=100, value=30)
     loan = st.sidebar.number_input("Montant du Prêt demandé (€)", min_value=100.0, value=5000.0, step=100.0)
     
-    # Calcul automatique du LTI (Loan to Income)
-    # LTI = Dette / Revenu
+    # Calcul automatique du LTI
     lti = loan / income
-    
-    # Affichage du LTI calculé pour info
-    st.sidebar.info(f"Ratio Dette/Revenu (LTI) calculé : {lti:.4f}")
+    st.sidebar.info(f"Ratio Dette/Revenu (LTI) : {lti:.4f}")
     
     data = {
         'income': income,
@@ -76,66 +82,50 @@ def user_input_features():
         'loan': loan,
         'LTI': lti
     }
-    features = pd.DataFrame(data, index=[0])
-    return features
+    return pd.DataFrame(data, index=[0])
 
-# Récupération des données saisies par l'utilisateur
+# Récupération des saisies
 input_df = user_input_features()
 
-# ==========================================
-# 4. PARTIE PRINCIPALE (MAIN)
-# ==========================================
-st.title("🏦 Système de Scoring Crédit (IA)")
-st.markdown("""
-Cette application utilise un modèle de **Régression Logistique** pour estimer 
-la probabilité de défaut de paiement d'un client.
-""")
-
-# Affichage des données saisies
-st.subheader("1. Profil du client analysé")
+# Affichage du profil
+st.subheader("1. Profil du client")
 st.write(input_df)
 
 # ==========================================
-# 5. PRÉDICTION
+# 4. PRÉDICTION
 # ==========================================
 if st.button("Lancer l'analyse du risque"):
-    if model is not None:
-        # 1. Standardiser les nouvelles données comme lors de l'entraînement
-        input_df_scaled = scaler.transform(input_df)
+    # 1. Standardiser les données saisies (comme lors de l'entraînement)
+    input_df_scaled = scaler.transform(input_df)
 
-        # 2. Prédiction (Classe 0 ou 1)
-        prediction = model.predict(input_df_scaled)
+    # 2. Calculer la probabilité
+    prediction_proba = model.predict_proba(input_df_scaled)
+    risque_defaut = prediction_proba[0][1] # Probabilité de la classe 1
+
+    st.subheader("2. Résultat de l'analyse")
+    
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**Probabilité de défaut :**")
+        st.metric(label="Score de Risque", value=f"{risque_defaut:.2%}")
         
-        # 3. Probabilité (Risque en %)
-        prediction_proba = model.predict_proba(input_df_scaled)
-        risque_defaut = prediction_proba[0][1] # Probabilité de la classe 1 (Défaut)
+        # Couleur de la barre selon le risque
+        if risque_defaut < 0.2:
+            st.progress(risque_defaut) # Vert (implicite, barre courte)
+        elif risque_defaut < 0.5:
+            st.progress(risque_defaut) # Orange (barre moyenne)
+        else:
+            st.progress(risque_defaut) # Rouge (barre longue)
 
-        st.subheader("2. Résultat de l'analyse")
-
-        # Affichage dynamique selon le résultat
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Probabilité de défaut :")
-            # Barre de progression colorée
-            st.progress(risque_defaut)
-            st.metric(label="Score de Risque", value=f"{risque_defaut:.2%}")
-
-        with col2:
-            st.write("Décision recommandée :")
-            if risque_defaut > 0.5: # Seuil de 50% (modifiable par la banque)
-                st.error("⛔ **REFUS CONSEILLÉ**")
-                st.write("Le risque est trop élevé (Défaut Probable).")
-            elif risque_defaut > 0.2:
-                st.warning("⚠️ **EXAMEN MANUEL REQUIS**")
-                st.write("Risque modéré.")
-            else:
-                st.success("✅ **ACCORD CONSEILLÉ**")
-                st.write("Le client présente un profil fiable.")
-
-        # Explication des facteurs (Coefficients)
-        st.markdown("---")
-        st.info("💡 **Note :** Le modèle privilégie l'âge (stabilité) et pénalise un ratio LTI élevé.")
-
-    else:
-
-        st.error("Erreur : Modèle non chargé.")
+    with col2:
+        st.write("**Recommandation IA :**")
+        if risque_defaut > 0.5:
+            st.error("⛔ REFUS CONSEILLÉ")
+            st.write("Le risque de non-remboursement est très élevé.")
+        elif risque_defaut > 0.2:
+            st.warning("⚠️ EXAMEN MANUEL REQUIS")
+            st.write("Risque modéré, vérifiez les garanties.")
+        else:
+            st.success("✅ ACCORD CONSEILLÉ")
+            st.write("Profil fiable et stable.")
