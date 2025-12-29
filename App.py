@@ -22,7 +22,14 @@ st.set_page_config(
 def load_and_train_model():
     # Chargement
     try:
-        df = pd.read_csv("credit_data.csv")
+        import os
+
+# On récupère le chemin absolu du dossier où se trouve app.py
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# On colle ce chemin avec le nom du fichier
+file_path = os.path.join(current_dir, "credit_data.csv")
+
+df = pd.read_csv(file_path)
         df = df.dropna()
     except FileNotFoundError:
         st.error("Le fichier 'credit_data.csv' est introuvable.")
@@ -130,4 +137,5 @@ if st.button("Lancer l'analyse du risque"):
         st.info("💡 **Note :** Le modèle privilégie l'âge (stabilité) et pénalise un ratio LTI élevé.")
 
     else:
+
         st.error("Erreur : Modèle non chargé.")
